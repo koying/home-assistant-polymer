@@ -6,9 +6,10 @@ import { html } from "@polymer/polymer/lib/utils/html-tag";
 import { PolymerElement } from "@polymer/polymer/polymer-element";
 
 import HassMediaPlayerEntity from "../util/hass-media-player-model";
+import { fetchMediaPlayerThumbnailWithCache } from "../data/media-player";
 
-import computeStateName from "../common/entity/compute_state_name";
-import EventsMixin from "../mixins/events-mixin";
+import { computeStateName } from "../common/entity/compute_state_name";
+import { EventsMixin } from "../mixins/events-mixin";
 import LocalizeMixin from "../mixins/localize-mixin";
 
 /*
@@ -53,6 +54,10 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
         }
 
         .banner.content-type-music:before {
+          padding-top: 100%;
+        }
+
+        .banner.content-type-game:before {
           padding-top: 100%;
         }
 
@@ -131,6 +136,10 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
           height: 44px;
         }
 
+        .playback-controls {
+          direction: ltr;
+        }
+
         paper-icon-button {
           opacity: var(--dark-primary-opacity);
         }
@@ -158,7 +167,9 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
         }
       </style>
 
-      <div class$="[[computeBannerClasses(playerObj)]]">
+      <div
+        class$="[[computeBannerClasses(playerObj, _coverShowing, _coverLoadError)]]"
+      >
         <div class="cover" id="cover"></div>
 
         <div class="caption">
@@ -177,20 +188,23 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
 
       <div class="controls layout horizontal justified">
         <paper-icon-button
+          aria-label="Turn off"
           icon="hass:power"
           on-click="handleTogglePower"
           invisible$="[[computeHidePowerButton(playerObj)]]"
           class="self-center secondary"
         ></paper-icon-button>
 
-        <div>
+        <div class="playback-controls">
           <paper-icon-button
+            aria-label="Previous track"
             icon="hass:skip-previous"
             invisible$="[[!playerObj.supportsPreviousTrack]]"
             disabled="[[playerObj.isOff]]"
             on-click="handlePrevious"
           ></paper-icon-button>
           <paper-icon-button
+            aria-label="Play or Pause"
             class="primary"
             icon="[[computePlaybackControlIcon(playerObj)]]"
             invisible$="[[!computePlaybackControlIcon(playerObj)]]"
@@ -198,6 +212,15 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
             on-click="handlePlaybackControl"
           ></paper-icon-button>
           <paper-icon-button
+            aria-label="Stop"
+            class="primary"
+            icon="hass:stop"
+            invisible$="[[computeHideStopButton(playerObj)]]"
+            disabled="[[playerObj.isOff]]"
+            on-click="handleStopControl"
+          ></paper-icon-button>
+          <paper-icon-button
+            aria-label="Next track"
             icon="hass:skip-next"
             invisible$="[[!playerObj.supportsNextTrack]]"
             disabled="[[playerObj.isOff]]"
@@ -206,6 +229,7 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
         </div>
 
         <paper-icon-button
+          aria-label="More information."
           icon="hass:dots-vertical"
           on-click="handleOpenMoreInfo"
           class="self-center secondary"
@@ -228,6 +252,14 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
         computed: "computePlaybackControlIcon(playerObj)",
       },
       playbackPosition: Number,
+      _coverShowing: {
+        type: Boolean,
+        value: false,
+      },
+      _coverLoadError: {
+        type: Boolean,
+        value: false,
+      },
     };
   }
 
@@ -260,15 +292,29 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
     }
 
     // We have a new picture url
+    // If entity picture is non-relative, we use that url directly.
+    if (picture.substr(0, 1) !== "/") {
+      this._coverShowing = true;
+      this._coverLoadError = false;
+      this.$.cover.style.backgroundImage = `url(${picture})`;
+      return;
+    }
+
     try {
-      const { content_type: contentType, content } = await this.hass.callWS({
-        type: "media_player_thumbnail",
-        entity_id: playerObj.stateObj.entity_id,
-      });
+      const {
+        content_type: contentType,
+        content,
+      } = await fetchMediaPlayerThumbnailWithCache(
+        this.hass,
+        playerObj.stateObj.entity_id
+      );
+      this._coverShowing = true;
+      this._coverLoadError = false;
       this.$.cover.style.backgroundImage = `url(data:${contentType};base64,${content})`;
     } catch (err) {
+      this._coverShowing = false;
+      this._coverLoadError = true;
       this.$.cover.style.backgroundImage = "";
-      this.$.cover.parentElement.classList.add("no-cover");
     }
   }
 
@@ -276,17 +322,26 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
     this.playbackPosition = this.playerObj.currentProgress;
   }
 
-  computeBannerClasses(playerObj) {
+  computeBannerClasses(playerObj, coverShowing, coverLoadError) {
     var cls = "banner";
+
+    if (!playerObj) {
+      return cls;
+    }
 
     if (playerObj.isOff || playerObj.isIdle) {
       cls += " is-off no-cover";
-    } else if (!playerObj.stateObj.attributes.entity_picture) {
+    } else if (
+      !playerObj.stateObj.attributes.entity_picture ||
+      coverLoadError ||
+      !coverShowing
+    ) {
       cls += " no-cover";
     } else if (playerObj.stateObj.attributes.media_content_type === "music") {
       cls += " content-type-music";
+    } else if (playerObj.stateObj.attributes.media_content_type === "game") {
+      cls += " content-type-game";
     }
-
     return cls;
   }
 
@@ -330,6 +385,10 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
     return "";
   }
 
+  computeHideStopButton(playerObj) {
+    return (playerObj.supportsStop && playerObj.isPlaying);
+  }
+
   _computeStateName(stateObj) {
     return computeStateName(stateObj);
   }
@@ -347,6 +406,11 @@ class HaMediaPlayerCard extends LocalizeMixin(EventsMixin(PolymerElement)) {
   handlePlaybackControl(ev) {
     ev.stopPropagation();
     this.playerObj.mediaPlayPause();
+  }
+
+  handleStopControl(ev) {
+    ev.stopPropagation();
+    this.playerObj.mediaStop();
   }
 
   handlePrevious(ev) {
